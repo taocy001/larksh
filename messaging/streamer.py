@@ -220,8 +220,8 @@ class CardStreamer:
     def __init__(self, api_client: FeishuApiClient, config):
         self._api = api_client
         out_cfg = config.get("output", {})
-        self._max_chars: int = out_cfg.get("max_output_chars", 8000)
-        self._max_lines: int = out_cfg.get("max_lines", 100)
+        self._max_chars: int = out_cfg.get("max_output_chars", 20000)
+        self._max_lines: int = out_cfg.get("max_lines", 500)
         # Streaming push interval: 100ms triggers Feishu rate-limiting; 500ms (2/sec) is safe; set 0 to disable streaming
         self._push_interval: float = out_cfg.get("push_interval_ms", 500) / 1000.0
         self._idle_timeout: float = out_cfg.get("idle_timeout_ms", 500) / 1000.0

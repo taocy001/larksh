@@ -57,7 +57,7 @@ shell:
 
 output:
   # 输出最大字符数（超出截断）
-  max_output_chars: 8000
+  max_output_chars: 20000
 
   # 流式推送间隔（毫秒）：命令执行期间每隔此时间 PATCH 卡片显示实时输出
   # 建议 500（0.5秒）；设为 0 可关闭流式推送（仅在命令完成后一次性更新）
@@ -68,7 +68,7 @@ output:
   idle_timeout_ms: 500
 
   # 代码块最大行数（超出后只显示末尾 N 行）
-  max_lines: 100
+  max_lines: 500
 
 logging:
   level: "INFO"

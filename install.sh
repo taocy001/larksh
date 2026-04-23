@@ -31,21 +31,21 @@ mkdir -p /var/log/larksh
 
 echo ""
 echo "✅ Installation complete!"
-echo "   1. Configure: cp deploy/config.example.yaml $INSTALL_DIR/config.yaml && vi $INSTALL_DIR/config.yaml"
+echo "   1. Configure: cp dist-files/config.example.yaml $INSTALL_DIR/config.yaml && vi $INSTALL_DIR/config.yaml"
 echo "   2. Start:     $INSTALL_DIR/.venv/bin/python $INSTALL_DIR/main.py --config $INSTALL_DIR/config.yaml"
 echo ""
 
 # Log rotation
-if command -v logrotate >/dev/null 2>&1 && [ -f deploy/larksh.logrotate ]; then
+if command -v logrotate >/dev/null 2>&1 && [ -f dist-files/larksh.logrotate ]; then
   echo "   Log rotation (optional):"
-  echo "     cp deploy/larksh.logrotate /etc/logrotate.d/larksh"
+  echo "     cp dist-files/larksh.logrotate /etc/logrotate.d/larksh"
   echo ""
 fi
 
 # systemd (standard Linux)
-if command -v systemctl >/dev/null 2>&1 && [ -f deploy/larksh.service ]; then
+if command -v systemctl >/dev/null 2>&1 && [ -f dist-files/larksh.service ]; then
   echo "   systemd deployment (remember to set User= to the actual runtime user):"
-  echo "     cp deploy/larksh.service /etc/systemd/system/"
+  echo "     cp dist-files/larksh.service /etc/systemd/system/"
   echo "     systemctl enable --now larksh"
   echo ""
 fi

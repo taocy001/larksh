@@ -47,7 +47,7 @@ python3 -m venv .venv
 ### 2. 配置
 
 ```bash
-cp deploy/config.example.yaml config.yaml
+cp dist-files/config.example.yaml config.yaml
 # 编辑 config.yaml，填入飞书 app_id、app_secret 及用户白名单
 ```
 
@@ -150,8 +150,8 @@ shell:
     LANG: "en_US.UTF-8"
 
 output:
-  max_output_chars: 8000        # 单次最大输出字符数（超出截断）
-  max_lines: 100                # 代码块最大行数（超出只显示末尾 N 行）
+  max_output_chars: 20000        # 单次最大输出字符数（超出截断）
+  max_lines: 500                # 代码块最大行数（超出只显示末尾 N 行）
   push_interval_ms: 2000        # 流式推送间隔（毫秒，0 为关闭）
   idle_timeout_ms: 500          # 命令完成静默超时（毫秒）
 
@@ -221,7 +221,7 @@ make dist
 # 生成 dist/larksh-<版本>.tar.gz
 ```
 
-版本号取自 `git describe --tags`，未打 tag 时为 `dev`。打包内容包括所有源代码、`install.sh`、`deploy/`（服务文件和配置模板）和 `README.md`。
+版本号取自 `git describe --tags`，未打 tag 时为 `dev`。打包内容包括所有源代码、`install.sh`、`dist-files/`（服务文件和配置模板）和 `README.md`。
 
 **在目标机器上安装**：
 
@@ -248,7 +248,7 @@ sudo cp config.yaml /etc/larksh/config.yaml
 cd /opt/larksh && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 # 2. 安装 systemd 服务
-sudo cp deploy/larksh.service /etc/systemd/system/
+sudo cp dist-files/larksh.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now larksh
 
@@ -256,7 +256,7 @@ sudo systemctl enable --now larksh
 journalctl -u larksh -f
 ```
 
-> `deploy/larksh.service` 中 `User=nobody`，请根据实际运行用户修改。
+> `dist-files/larksh.service` 中 `User=nobody`，请根据实际运行用户修改。
 
 **更新代码**（在开发目录执行）：
 ```bash

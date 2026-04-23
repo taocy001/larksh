@@ -193,7 +193,7 @@ class CommandExecutor:
 
     def __init__(self, config, audit_logger=None) -> None:
         out_cfg = config.get("output", {})
-        self._max_output_chars: int = int(out_cfg.get("max_output_chars", 8000))
+        self._max_output_chars: int = int(out_cfg.get("max_output_chars", 20000))
         self._push_interval: float = float(out_cfg.get("push_interval_ms", 500)) / 1000
         self._default_timeout: float = 60.0
         self._audit = audit_logger
