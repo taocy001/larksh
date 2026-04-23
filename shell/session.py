@@ -37,6 +37,9 @@ _INIT_SCRIPT = (
     "stty -echo 2>/dev/null; "
     "export PS1='' PS2='' PS3='' PS4=''; "
     "unset HISTFILE; export HISTSIZE=0 HISTFILESIZE=0; "
+    # Disable pagers so commands like systemctl/git/man dump output directly
+    # instead of blocking on interactive pager input.
+    "export PAGER=cat SYSTEMD_PAGER='' GIT_PAGER=cat; "
     f'echo "{_STARTUP_SENTINEL}"\n'
 )
 
