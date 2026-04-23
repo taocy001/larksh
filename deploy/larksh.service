@@ -1,0 +1,30 @@
+[Unit]
+Description=larksh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody                      # 按实际运行用户修改
+WorkingDirectory=/opt/larksh
+ExecStart=/opt/larksh/.venv/bin/python main.py --config /etc/larksh/config.yaml
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60         # 60 秒内最多重启 5 次，防止配置错误导致无限重启
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=larksh
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+LogsDirectory=larksh             # systemd 自动创建 /var/log/larksh 并赋予 User 写权限
+MemoryMax=512M
+CPUQuota=80%
+# 若 shell 会话需要写入其他路径（如用户家目录），在此追加：
+# ReadWritePaths=/home/youruser
+
+[Install]
+WantedBy=multi-user.target

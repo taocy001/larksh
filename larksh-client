@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""
+larksh-client — larksh local client
+
+Usage:
+  larksh-client edit <remote-path> [--doc <doc_id> --block <block_id>]
+
+  --doc / --block are optional. If the bot has already created the document,
+  the message-trigger step is skipped.
+
+Config file ~/.larksh.json:
+  {
+    "app_id":     "cli_xxx",
+    "app_secret": "xxx",
+    "open_id":    "ou_xxx"
+  }
+  open_id is your own Lark open_id, available in the Lark admin console
+  under "Member Management".
+
+Workflow:
+  1. Send /edit <remote-path> to the bot and retrieve chat_id from the response
+  2. Poll conversation messages, waiting for the bot to reply with doc_id + block_id
+  3. Fetch the Lark document raw_content and extract the file contents
+  4. Write to a local temp file and open $EDITOR
+  5. Watch for file changes (mtime polling, 500ms), debounce 2s before writing back to the document
+  6. After the editor exits, wait for a bot confirmation message (timeout 15s)
+  7. Clean up the temp file
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Optional
+
+import httpx
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+FEISHU_BASE = "https://open.feishu.cn/open-apis"
+TOKEN_URL   = f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal"
+MSG_SEND    = f"{FEISHU_BASE}/im/v1/messages"
+MSG_LIST    = f"{FEISHU_BASE}/im/v1/messages"
+DOCX_BASE   = f"{FEISHU_BASE}/docx/v1/documents"
+
+POLL_INTERVAL      = 0.5   # file-change polling interval (seconds)
+DEBOUNCE_SECONDS   = 2.0   # debounce: wait N seconds after last save before writing back to document
+MSG_POLL_INTERVAL  = 1.0   # message polling interval (seconds)
+DOC_ID_WAIT_TIMEOUT = 30   # timeout waiting for bot reply (seconds)
+CONFIRM_WAIT_TIMEOUT = 15  # timeout waiting for bot write confirmation (seconds)
+
+# ---------------------------------------------------------------------------
+# Config (JSON, stdlib only — no extra dependencies)
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    cfg_path = Path.home() / ".larksh.json"
+    if not cfg_path.exists():
+        return _interactive_setup(cfg_path)
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    for key in ("app_id", "app_secret", "open_id"):
+        if not cfg.get(key):
+            sys.exit(f"Config file missing field: {key}. Please edit {cfg_path}")
+    return cfg
+
+
+def _interactive_setup(cfg_path: Path) -> dict:
+    print("=" * 56)
+    print("  larksh-client first run — Lark credentials required")
+    print(f"  Config will be saved to {cfg_path}")
+    print("=" * 56)
+    print()
+    print("app_id / app_secret: Lark Open Platform > App Management > Credentials & Basic Info")
+    print()
+
+    try:
+        app_id = input("app_id  (cli_xxx): ").strip()
+        if not app_id:
+            sys.exit("Cancelled.")
+        app_secret = getpass.getpass("app_secret      : ")
+        if not app_secret:
+            sys.exit("Cancelled.")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit("Cancelled.")
+
+    # Validate app_id / app_secret
+    print()
+    print("→ Validating credentials...", end="", flush=True)
+    try:
+        resp = httpx.post(
+            TOKEN_URL,
+            json={"app_id": app_id, "app_secret": app_secret},
+            timeout=10.0,
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            print(f" ✗")
+            sys.exit(f"Invalid credentials: {data.get('msg', 'unknown error')} (code={data.get('code')})")
+        print(" ✓")
+    except httpx.RequestError as e:
+        print(f" ✗")
+        sys.exit(f"Cannot connect to Lark server: {e}")
+
+    print()
+    print("open_id: your own Lark user ID (starts with ou_)")
+    print("  How to find it: Lark Admin Console > Member Management > click yourself > copy open_id")
+    print()
+    try:
+        open_id = input("open_id  (ou_xxx): ").strip()
+        if not open_id:
+            sys.exit("Cancelled.")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        sys.exit("Cancelled.")
+
+    if not open_id.startswith("ou_"):
+        print(f"⚠️  open_id usually starts with ou_, but got: {open_id!r}")
+        try:
+            confirm = input("Continue anyway? [y/N] ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            sys.exit("Cancelled.")
+        if confirm != "y":
+            sys.exit("Cancelled.")
+
+    cfg = {"app_id": app_id, "app_secret": app_secret, "open_id": open_id}
+    cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    cfg_path.chmod(0o600)  # restrict file permissions to protect credentials
+
+    print()
+    print(f"✅ Config saved to {cfg_path}")
+    print()
+    return cfg
+
+# ---------------------------------------------------------------------------
+# Feishu API client (synchronous, httpx, stdlib-only)
+# ---------------------------------------------------------------------------
+
+class Client:
+    def __init__(self, app_id: str, app_secret: str):
+        self._app_id     = app_id
+        self._app_secret = app_secret
+        self._token: str        = ""
+        self._token_expire: float = 0.0
+        self._http = httpx.Client(timeout=30.0)
+
+    def _get_token(self) -> str:
+        if time.time() < self._token_expire - 60:
+            return self._token
+        resp = self._http.post(
+            TOKEN_URL,
+            json={"app_id": self._app_id, "app_secret": self._app_secret},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._token        = data["tenant_access_token"]
+        self._token_expire = time.time() + data.get("expire", 7200)
+        return self._token
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self._get_token()}",
+            "Content-Type":  "application/json; charset=utf-8",
+        }
+
+    def post(self, url: str, payload: dict, params: dict = None) -> dict:
+        resp = self._http.post(url, headers=self._headers(), json=payload, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def patch(self, url: str, payload: dict) -> dict:
+        resp = self._http.patch(url, headers=self._headers(), json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get(self, url: str, params: dict = None) -> dict:
+        resp = self._http.get(url, headers=self._headers(), params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Messages
+    # ------------------------------------------------------------------
+
+    def send_text(self, open_id: str, text: str) -> tuple[str, str]:
+        """Send a text message to open_id. Returns (message_id, chat_id)."""
+        resp = self.post(
+            f"{MSG_SEND}?receive_id_type=open_id",
+            {
+                "receive_id": open_id,
+                "msg_type":   "text",
+                "content":    json.dumps({"text": text}),
+            },
+        )
+        data = resp["data"]
+        return data["message_id"], data["chat_id"]
+
+    def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        """Send a text message to chat_id (group or p2p). Returns message_id."""
+        resp = self.post(
+            f"{MSG_SEND}?receive_id_type=chat_id",
+            {
+                "receive_id": chat_id,
+                "msg_type":   "text",
+                "content":    json.dumps({"text": text}),
+            },
+        )
+        return resp["data"]["message_id"]
+
+    def list_messages(self, chat_id: str, after_ts: int) -> list[dict]:
+        """List messages in chat_id sent after after_ts (Unix timestamp in seconds)."""
+        resp = self.get(
+            MSG_LIST,
+            params={
+                "container_type": "chat",
+                "container_id":   chat_id,
+                "start_time":     str(after_ts),
+                "page_size":      20,
+                "sort_type":      "ByCreateTimeAsc",
+            },
+        )
+        return resp.get("data", {}).get("items", [])
+
+    # ------------------------------------------------------------------
+    # Lark documents
+    # ------------------------------------------------------------------
+
+    def get_doc_raw_content(self, doc_id: str) -> str:
+        resp = self.get(f"{DOCX_BASE}/{doc_id}/raw_content", params={"lang": 0})
+        return resp["data"]["content"]
+
+    def update_doc_text_block(self, doc_id: str, block_id: str, content: str) -> None:
+        self.patch(
+            f"{DOCX_BASE}/{doc_id}/blocks/{block_id}",
+            {"update_text_elements": {"elements": [{"text_run": {"content": content}}]}},
+        )
+
+# ---------------------------------------------------------------------------
+# fence parsing / building
+# ---------------------------------------------------------------------------
+
+def extract_fence_content(raw: str) -> Optional[str]:
+    lines = raw.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            if start is None:
+                start = i + 1
+            else:
+                return "\n".join(lines[start:i])
+    return None
+
+
+def build_fence(path: str, content: str) -> str:
+    return f"{path}\n```\n{content}\n```"
+
+# ---------------------------------------------------------------------------
+# Message polling helpers
+# ---------------------------------------------------------------------------
+
+def _extract_message_text(msg: dict) -> Optional[str]:
+    """Extract plain text from a Lark message (supports text and interactive card messages)."""
+    body_content = msg.get("body", {}).get("content", "")
+    if not body_content:
+        return None
+    try:
+        parsed = json.loads(body_content)
+    except Exception:
+        return None
+    msg_type = msg.get("msg_type", "")
+    if msg_type == "text":
+        return parsed.get("text", "")
+    elif msg_type == "interactive":
+        # CardKit 2.0: body.elements[].text.content
+        parts: list[str] = []
+        for elem in parsed.get("body", {}).get("elements", []):
+            if elem.get("tag") == "div":
+                parts.append(elem.get("text", {}).get("content", ""))
+        return "\n".join(parts)
+    return None
+
+
+def wait_for_bot_reply(
+    client: Client,
+    chat_id: str,
+    after_ts: int,
+    matcher,
+    timeout: float,
+    description: str,
+):
+    """Poll messages until matcher returns non-None, or return None on timeout."""
+    deadline = time.time() + timeout
+    print(f"  Waiting for {description} (up to {int(timeout)}s)...", end="", flush=True)
+    while time.time() < deadline:
+        try:
+            msgs = client.list_messages(chat_id, after_ts)
+            for msg in msgs:
+                text = _extract_message_text(msg)
+                if text is None:
+                    continue
+                result = matcher(text)
+                if result is not None:
+                    print(" ✓")
+                    return result
+        except Exception:
+            pass
+        time.sleep(MSG_POLL_INTERVAL)
+        print(".", end="", flush=True)
+    print(" timed out")
+    return None
+
+
+def match_doc_info(text: str) -> Optional[tuple[str, str]]:
+    """Extract (doc_id, block_id) from a bot reply. Format: --doc <id> --block <id>"""
+    m_doc   = re.search(r"--doc\s+(\S+)",   text)
+    m_block = re.search(r"--block\s+(\S+)", text)
+    if m_doc and m_block:
+        return m_doc.group(1), m_block.group(1)
+    return None
+
+
+def match_confirmation(path: str):
+    def _match(text: str) -> Optional[str]:
+        if "已更新" in text and path in text:
+            return text
+        return None
+    return _match
+
+# ---------------------------------------------------------------------------
+# File sync
+# ---------------------------------------------------------------------------
+
+def sync_to_doc(
+    client: Client,
+    doc_id: str,
+    block_id: str,
+    remote_path: str,
+    tmp_path: Path,
+) -> None:
+    content = tmp_path.read_text(encoding="utf-8")
+    fence = build_fence(remote_path, content)
+    try:
+        client.update_doc_text_block(doc_id, block_id, fence)
+        print(f"  ↑ Synced to document ({len(content)} bytes)")
+    except Exception as e:
+        print(f"  ✗ Sync failed: {e}")
+
+# ---------------------------------------------------------------------------
+# edit command — main flow
+# ---------------------------------------------------------------------------
+
+def cmd_edit(args, cfg: dict) -> None:
+    remote_path: str       = args.remote_path
+    doc_id: Optional[str]  = args.doc
+    block_id: Optional[str] = args.block
+    chat_id: Optional[str] = getattr(args, "chat", None) or None
+
+    client   = Client(cfg["app_id"], cfg["app_secret"])
+    open_id: str = cfg["open_id"]
+
+    # ------------------------------------------------------------------
+    # 1. Trigger bot to create document (if --doc / --block not provided)
+    # ------------------------------------------------------------------
+    send_ts = int(time.time())
+
+    if not (doc_id and block_id):
+        print(f"→ Sending /edit {remote_path} to bot...")
+        _, chat_id = client.send_text(open_id, f"/edit {remote_path}")
+
+        result = wait_for_bot_reply(
+            client, chat_id, send_ts,
+            match_doc_info,
+            timeout=DOC_ID_WAIT_TIMEOUT,
+            description="bot reply with doc_id+block_id",
+        )
+        if not result:
+            sys.exit("No doc_id received. Exiting.")
+        doc_id, block_id = result
+        print(f"  doc={doc_id}  block={block_id}")
+    else:
+        print(f"→ Using existing document: doc={doc_id} block={block_id}")
+
+    # ------------------------------------------------------------------
+    # 2. Fetch file contents
+    # ------------------------------------------------------------------
+    print(f"→ Fetching document contents...")
+    raw = client.get_doc_raw_content(doc_id)
+    file_content = extract_fence_content(raw)
+    if file_content is None:
+        sys.exit("Could not extract file content from document — the format may be incorrect.")
+
+    # ------------------------------------------------------------------
+    # 3. Write temp file and open editor
+    # ------------------------------------------------------------------
+    suffix   = Path(remote_path).suffix or ".txt"
+    name_hash = hashlib.md5(remote_path.encode()).hexdigest()[:8]
+    tmp_path  = Path(tempfile.gettempdir()) / f"larksh-edit-{name_hash}{suffix}"
+    tmp_path.write_text(file_content, encoding="utf-8")
+
+    editor = os.environ.get("EDITOR", "vi")
+    print(f"→ Opening {editor} to edit {remote_path}")
+    print(f"  (temp file: {tmp_path} — auto-syncs 2s after each save)")
+
+    last_mtime     = tmp_path.stat().st_mtime
+    last_write_ts  = 0.0
+    confirm_after_ts = send_ts
+
+    proc = subprocess.Popen([editor, str(tmp_path)])
+
+    # ------------------------------------------------------------------
+    # 4. Watch for file changes, debounce writes back to document
+    # ------------------------------------------------------------------
+    try:
+        while proc.poll() is None:
+            time.sleep(POLL_INTERVAL)
+            try:
+                mtime = tmp_path.stat().st_mtime
+            except FileNotFoundError:
+                break
+
+            if mtime != last_mtime:
+                last_mtime    = mtime
+                last_write_ts = time.time()
+
+            if last_write_ts > 0 and time.time() - last_write_ts >= DEBOUNCE_SECONDS:
+                sync_to_doc(client, doc_id, block_id, remote_path, tmp_path)
+                confirm_after_ts = int(time.time())
+                last_write_ts    = 0.0
+
+    except KeyboardInterrupt:
+        proc.terminate()
+
+    proc.wait()
+
+    # ------------------------------------------------------------------
+    # 5. Final sync after editor exits
+    # ------------------------------------------------------------------
+    if tmp_path.exists():
+        sync_to_doc(client, doc_id, block_id, remote_path, tmp_path)
+
+    # ------------------------------------------------------------------
+    # 6. Done notice (bot polls in the background and writes the file within ~5 seconds)
+    # ------------------------------------------------------------------
+    print(f"✅ Synced to document. Bot will write {remote_path} within ~5 seconds.")
+
+    # ------------------------------------------------------------------
+    # 7. Clean up temp file
+    # ------------------------------------------------------------------
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="larksh local client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    edit_p = sub.add_parser("edit", help="Edit a remote file")
+    edit_p.add_argument("remote_path", help="Remote file path, e.g. /etc/nginx/nginx.conf")
+    edit_p.add_argument("--doc",   help="document_id (skip the message-trigger step)", default=None)
+    edit_p.add_argument("--block", help="content block_id (used together with --doc)", default=None)
+    edit_p.add_argument("--chat",  help="chat_id (used with --doc/--block for sending /edit-commit)", default=None)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    cfg = load_config()
+
+    if args.command == "edit":
+        cmd_edit(args, cfg)
+
+
+if __name__ == "__main__":
+    main()

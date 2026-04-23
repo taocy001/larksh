@@ -1,0 +1,74 @@
+# larksh 配置
+feishu:
+  app_id: "cli_xxxxxxxxxxxxxxxx"
+  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+  # 事件接入模式: "websocket" 或 "webhook"
+  event_mode: "websocket"
+
+  # webhook 模式时的配置（event_mode=webhook 时生效）
+  webhook:
+    host: "0.0.0.0"
+    port: 9000
+    verification_token: ""
+    encrypt_key: ""
+
+security:
+  # open_id 白名单（ou_开头）
+  allowed_users:
+    - "ou_xxxxxxxxxxxxxxxxxxxxxxxx"
+
+  # chat_id 白名单（群聊，oc_开头）
+  # 群内所有成员均可使用
+  allowed_groups: []
+
+  # 命令黑名单（fnmatch 模式）
+  command_blacklist:
+    - "rm -rf /*"
+    - "dd if=*"
+    - ":(){:|:&};:"
+    - "mkfs*"
+
+  # 审计日志路径
+  audit_log: "/var/log/larksh/audit.jsonl"
+
+  # 文件访问路径白名单（/get、/save、/edit 命令）
+  # 配置后只允许访问列表中目录及其子路径；不配置或留空则不限制
+  # path_allowlist:
+  #   - "/home"
+  #   - "/tmp"
+  #   - "/opt/larksh"
+
+shell:
+  # bash 可执行文件路径
+  bash_path: "/bin/bash"
+
+  # 会话超时（秒）
+  session_timeout: 3600
+
+  # PTY 终端大小
+  pty_cols: 220
+  pty_rows: 40
+
+  # 额外环境变量
+  env:
+    TERM: "xterm-256color"
+    LANG: "en_US.UTF-8"
+
+output:
+  # 输出最大字符数（超出截断）
+  max_output_chars: 8000
+
+  # 流式推送间隔（毫秒）：命令执行期间每隔此时间 PATCH 卡片显示实时输出
+  # 建议 2000（2秒）；设为 0 可关闭流式推送（仅在命令完成后一次性更新）
+  # 过小（<500）可能触发飞书 API 限速
+  push_interval_ms: 2000
+
+  # 命令完成静默超时（毫秒）
+  idle_timeout_ms: 500
+
+  # 代码块最大行数（超出后只显示末尾 N 行）
+  max_lines: 100
+
+logging:
+  level: "INFO"

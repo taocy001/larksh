@@ -1,0 +1,12 @@
+# larksh 日志轮转配置
+# 安装：cp larksh.logrotate /etc/logrotate.d/larksh
+
+/var/log/larksh/audit.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # AuditLogger 每次写入后关闭文件，轮转后无需发送信号重新打开
+}
